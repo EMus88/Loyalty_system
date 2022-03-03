@@ -1,0 +1,10 @@
+db: 
+    migration:
+                isAllowed: true
+                
+auth:
+    #token live(minutes)
+    accessTokenExp: 30
+
+accrual:
+    timeout: 500
