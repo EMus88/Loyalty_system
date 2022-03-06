@@ -4,6 +4,7 @@ import (
 	"Loyalty/internal/client"
 	"Loyalty/internal/models"
 	"Loyalty/internal/repository"
+	"Loyalty/pkg/luhn"
 	numbergenerator "Loyalty/pkg/numberGenerator"
 	"errors"
 	"time"
@@ -12,6 +13,8 @@ import (
 	"github.com/spf13/viper"
 )
 
+const StatusNew = "NEW"
+
 type Repository interface {
 	//auth methods
 	SaveUser(*models.User, uint64) error
@@ -19,11 +22,11 @@ type Repository interface {
 	//user methods
 	CreateLoyaltyAccount(uint64) error
 	SaveOrder(order *models.Order, login string) error
-	GetOrders(login string) ([]models.Order, error)
+	GetOrders(login string) ([]models.OrderDTO, error)
 	UpdateOrder(*models.Order) error
 	GetBalance(login string) (*models.Account, error)
-	Withdraw(*models.Withdraw, string) error
-	GetWithdrawls(string) ([]models.Withdraw, error)
+	Withdraw(*models.WithdrawalDTO, string) error
+	GetWithdrawls(string) ([]models.WithdrawalDTO, error)
 	//orders queue
 	AddToQueue(order string)
 	TakeFirst() string
@@ -53,7 +56,37 @@ func NewService(r *repository.Repository, c *client.AccrualClient, logger *logru
 		logger:     logger,
 	}
 }
+func (s *Service) Withdraw(withdraw *models.WithdrawalDTO, login string) error {
+	//validate order number
+	if ok := luhn.Validate(string(withdraw.Order)); !ok {
+		return ErrNotValid
+	}
+	//check bonuses
+	accountState, err := s.Repository.GetBalance(login)
+	if err != nil {
+		return ErrInt
+	}
+	sum := uint64(withdraw.Sum * 100)
+	// if not enough bonuses
+	if accountState.Current < sum {
+		return ErrNoMoney
+	}
+	//save order in db
+	var order models.Order
+	order.Number = string(withdraw.Order)
+	order.Status = StatusNew
+	order.Accrual = 0
+	if err := s.Repository.SaveOrder(&order, login); err != nil {
+		return ErrInt
+	}
+	//save withdraw in db
+	if err := s.Repository.Withdraw(withdraw, login); err != nil {
+		return ErrInt
+	}
+	return nil
+}
 
+// creating account for user
 func (s *Service) CreateLoyaltyAccount(user *models.User) (uint64, error) {
 	//create account number
 	number, err := numbergenerator.GenerateNumber(15)
@@ -67,15 +100,17 @@ func (s *Service) CreateLoyaltyAccount(user *models.User) (uint64, error) {
 	return number, nil
 }
 
+// updating orders queue ============================================================
 func (s *Service) UpdateOrdersQueue() {
 	timeOut := time.Millisecond * time.Duration(viper.GetInt("accrual.timeout"))
 	for {
-		time.Sleep(1 * time.Second) //убрать
+		//take first order from queue
 		number := s.Repository.TakeFirst()
 		if number == "" {
 			time.Sleep(timeOut)
 			continue
 		}
+		//sent order to accrual system
 		accrual, err := s.Client.SentOrder(number)
 		if err != nil {
 			if errors.Is(err, errors.Unwrap(err)) {
@@ -89,7 +124,7 @@ func (s *Service) UpdateOrdersQueue() {
 		var order models.Order
 		order.Number = accrual.Order
 		order.Status = accrual.Status
-		order.Accrual = accrual.Accrual
+		order.Accrual = int(accrual.Accrual * 100)
 
 		s.logger.Infof("Worker: %v", order)
 		//if order status is final
@@ -109,7 +144,7 @@ func (s *Service) UpdateOrdersQueue() {
 				var order models.Order
 				order.Number = accrual.Order
 				order.Status = accrual.Status
-				order.Accrual = accrual.Accrual
+				order.Accrual = int(accrual.Accrual * 100)
 				s.Repository.UpdateOrder(&order)
 				s.Repository.AddToCash(accrual.Order, accrual.Status)
 			}

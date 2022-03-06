@@ -54,14 +54,14 @@ func main() {
 	//go cmd.Run()
 
 	//mock accrual server
-	go func() {
-		time.Sleep(time.Second * 2)
-		if err := c.AccrualMock(); err != nil {
-			logger.Error(err)
-		}
-	}()
+	// go func() {
+	// 	time.Sleep(time.Second * 2)
+	// 	if err := c.AccrualMock(); err != nil {
+	// 		logger.Error(err)
+	// 	}
+	// }()
 
-	// //run worker for updating orders queue
+	//run worker for updating orders queue
 	go s.UpdateOrdersQueue()
 
 	//init server
@@ -76,8 +76,19 @@ func main() {
 
 	//shutdown
 	quit := make(chan os.Signal, 1)
+	emptyQueue := make(chan struct{})
 	signal.Notify(quit, syscall.SIGTERM, syscall.SIGINT)
 	<-quit
-	<-time.After(time.Second * 2)
+	go func() {
+		for {
+			order := r.TakeFirst()
+			if order == "" {
+				emptyQueue <- struct{}{}
+			}
+		}
+	}()
+	<-emptyQueue
+	<-time.After(time.Second * 5)
+
 	logrus.Info("Server stopped")
 }

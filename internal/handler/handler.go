@@ -12,11 +12,9 @@ import (
 	"github.com/sirupsen/logrus"
 )
 
-const StatusNew = "NEW"
-
 type Handler struct {
 	service   *service.Service
-	userLogin string
+	UserLogin string
 	logger    *logrus.Logger
 }
 
@@ -46,15 +44,15 @@ func (h *Handler) Init() *gin.Engine {
 	user := router.Group("/api/user", h.AuthMiddleware)
 	{
 		//orders from user
-		user.POST("/orders", h.saveOrder)
+		user.POST("/orders", h.SaveOrder)
 		//withdrawal request
-		user.POST("/balance/withdraw", h.withdraw)
+		user.POST("/balance/withdraw", h.Withdraw)
 		//getting a list of orders
-		user.GET("/orders", h.getOrders)
+		user.GET("/orders", h.GetOrders)
 		//getting balance
-		user.GET("/balance", h.getBalance)
+		user.GET("/balance", h.GetBalance)
 		//getting information of withdrawals
-		user.GET("/balance/withdrawals", h.getWithdrowals)
+		user.GET("/balance/withdrawals", h.GetWithdrowals)
 	}
 	router.NoRoute(func(c *gin.Context) {
 		c.JSON(http.StatusBadRequest, gin.H{"Error": "Not correct URL"})
@@ -63,7 +61,7 @@ func (h *Handler) Init() *gin.Engine {
 }
 
 //=========================================================================
-func (h *Handler) saveOrder(c *gin.Context) {
+func (h *Handler) SaveOrder(c *gin.Context) {
 	//read request body
 	number, err := ioutil.ReadAll(c.Request.Body)
 	if err != nil || string(number) == "" {
@@ -78,9 +76,9 @@ func (h *Handler) saveOrder(c *gin.Context) {
 	//save order in db
 	var order models.Order
 	order.Number = string(number)
-	order.Status = StatusNew
+	order.Status = service.StatusNew
 	order.Accrual = 0
-	if err := h.service.Repository.SaveOrder(&order, h.userLogin); err != nil {
+	if err := h.service.Repository.SaveOrder(&order, h.UserLogin); err != nil {
 		h.logger.Error(err)
 		switch err {
 		case repository.ErrInt:
@@ -102,8 +100,8 @@ func (h *Handler) saveOrder(c *gin.Context) {
 }
 
 //=========================================================================
-func (h *Handler) getOrders(c *gin.Context) {
-	ordersList, err := h.service.Repository.GetOrders(h.userLogin)
+func (h *Handler) GetOrders(c *gin.Context) {
+	ordersList, err := h.service.Repository.GetOrders(h.UserLogin)
 	if err != nil {
 		c.JSON(http.StatusInternalServerError, err.Error())
 		return
@@ -116,60 +114,47 @@ func (h *Handler) getOrders(c *gin.Context) {
 }
 
 //=========================================================================
-func (h *Handler) getBalance(c *gin.Context) {
-	accountState, err := h.service.Repository.GetBalance(h.userLogin)
+func (h *Handler) GetBalance(c *gin.Context) {
+	accountState, err := h.service.Repository.GetBalance(h.UserLogin)
 	if err != nil {
 		c.JSON(http.StatusInternalServerError, err.Error())
 		return
 	}
-	c.JSON(http.StatusOK, accountState)
+	var balance models.Balance
+	balance.Current = float64(accountState.Current) / 100
+	balance.Withdrawn = float64(accountState.Withdrawn) / 100
+	c.JSON(http.StatusOK, balance)
 }
 
 //=========================================================================
-func (h *Handler) withdraw(c *gin.Context) {
-	var withdraw models.Withdraw
+func (h *Handler) Withdraw(c *gin.Context) {
+	var withdraw models.WithdrawalDTO
 	if err := c.ShouldBindJSON(&withdraw); err != nil {
 		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
 		return
 	}
-	//validate order number
-	if ok := luhn.Validate(string(withdraw.Order)); !ok {
-		c.String(http.StatusUnprocessableEntity, "Not valid number of order")
-		return
-	}
-	//check bonuses
-	accountState, err := h.service.Repository.GetBalance(h.userLogin)
-	if err != nil {
-		c.JSON(http.StatusInternalServerError, err.Error())
-		return
-	}
-	// if not enough bonuses
-	if accountState.Current < withdraw.Sum {
-		c.JSON(http.StatusPaymentRequired, gin.H{"error": "not enough bonuses"})
-		return
-	}
-	//save order in db
-	var order models.Order
-	order.Number = string(withdraw.Order)
-	order.Status = StatusNew
-	order.Accrual = 0
-	if err := h.service.Repository.SaveOrder(&order, h.userLogin); err != nil {
+	if err := h.service.Withdraw(&withdraw, h.UserLogin); err != nil {
 		h.logger.Error(err)
+		switch err {
+		case service.ErrInt:
+			c.JSON(http.StatusInternalServerError, err.Error())
+		case service.ErrNoMoney:
+			c.JSON(http.StatusPaymentRequired, err.Error())
+		case service.ErrNotValid:
+			c.JSON(http.StatusUnprocessableEntity, err.Error())
+		default:
+			c.JSON(http.StatusInternalServerError, err.Error())
+
+		}
 		return
 	}
-	//save withdraw in db
-	if err := h.service.Repository.Withdraw(&withdraw, h.userLogin); err != nil {
-		c.JSON(http.StatusInternalServerError, err.Error())
-		return
-	}
-	c.JSON(http.StatusOK, gin.H{"withdraw": "done"})
-	//add order to queue
-	h.service.Repository.AddToQueue(string(withdraw.Order))
+
+	c.JSON(http.StatusOK, gin.H{"withdrawal": "done"})
 }
 
 //=========================================================================
-func (h *Handler) getWithdrowals(c *gin.Context) {
-	withdrawls, err := h.service.Repository.GetWithdrawls(h.userLogin)
+func (h *Handler) GetWithdrowals(c *gin.Context) {
+	withdrawls, err := h.service.Repository.GetWithdrawls(h.UserLogin)
 	if err != nil {
 		c.JSON(http.StatusInternalServerError, err.Error())
 		return
