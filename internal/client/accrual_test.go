@@ -1,9 +1,18 @@
 package client
 
 import (
+	"Loyalty/configs"
 	"bytes"
 	"encoding/json"
 	"fmt"
+	"log"
+	"net/http"
+	"os/exec"
+	"testing"
+	"time"
+
+	"github.com/go-playground/assert"
+	"github.com/sirupsen/logrus"
 )
 
 type cacheback struct {
@@ -22,82 +31,83 @@ type order struct {
 	Goods  []goods `json:"goods"`
 }
 
-func (c *AccrualClient) AccrualMock() error {
-	cashbacks := []cacheback{
-		{
-			Mutch:      "IPhone",
-			Reward:     7,
-			RewardType: "%",
-		},
-		{
-			Mutch:      "Samsung",
-			Reward:     17,
-			RewardType: "%",
-		},
-		{
-			Mutch:      "Huawei",
-			Reward:     12,
-			RewardType: "%",
-		},
+func Test_ClientAccrual(t *testing.T) {
+	type want struct {
+		status string
 	}
-	orders := []order{
-		{
-			Number: "123455",
-			Goods: []goods{
-				{
-					Description: "IPhone 11",
-					Price:       75000.74,
-				},
-			},
-		},
-		{
-			Number: "21312541",
-			Goods: []goods{
-				{
-					Description: "Samsung A51",
-					Price:       33000.47,
-				},
-			},
-		},
-		{
-			Number: "7643497",
-			Goods: []goods{
-				{
-					Description: "Huawei P30Lite",
-					Price:       17598.53,
-				},
-			},
-		},
-	}
-	url := fmt.Sprint(c.address, "/api/goods")
+	tests := []struct {
+		name      string
+		cacheback cacheback
+		order     order
 
-	for _, val := range cashbacks {
-		body, err := json.Marshal(val)
-		if err != nil {
-			return err
-		}
-		buffer := bytes.NewBuffer(body)
-		resp, err := c.client.Post(url, "application/json", buffer)
-		if err != nil {
-			return err
-		}
-		defer resp.Body.Close()
-		c.logger.Infof("Accrual mock. Request: %v, status: %s", string(body), resp.Status)
-	}
-	url = fmt.Sprint(c.address, "/api/orders")
-	for _, val := range orders {
-		body, err := json.Marshal(val)
-		if err != nil {
-			return err
-		}
-		buffer := bytes.NewBuffer(body)
-		resp, err := c.client.Post(url, "application/json", buffer)
-		if err != nil {
-			return err
-		}
-		defer resp.Body.Close()
-		c.logger.Infof("Accrual mock. Request: %v, status: %s", string(body), resp.Status)
+		want want
+	}{
+		{
+			name: "ok",
+			want: want{
+				status: "PROCESSED",
+			},
+			cacheback: cacheback{
+
+				Mutch:      "IPhone",
+				Reward:     7,
+				RewardType: "%",
+			},
+			order: order{
+				Number: "123455",
+				Goods: []goods{
+					{
+						Description: "IPhone 11",
+						Price:       75000.74,
+					},
+				},
+			},
+		},
 	}
 
-	return nil
+	conf := configs.NewConfigForTest()
+	client := NewAccrualClient(logrus.New(), conf.AccrualAddress)
+	//run accrual server
+	cmd := exec.Command("./cmd/accrual/accrual_linux_amd64")
+	go cmd.Run()
+	time.Sleep(time.Duration(3) * time.Second)
+
+	//run tests
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			url := fmt.Sprint(conf.AccrualAddress, "/api/goods")
+			body, err := json.Marshal(tt.cacheback)
+			if err != nil {
+				return
+			}
+			buffer := bytes.NewBuffer(body)
+			resp, err := http.Post(url, "application/json", buffer)
+			if err != nil {
+				return
+			}
+			defer resp.Body.Close()
+
+			url = fmt.Sprint(conf.AccrualAddress, "/api/orders")
+
+			body, err = json.Marshal(tt.order)
+			if err != nil {
+				return
+			}
+			buffer = bytes.NewBuffer(body)
+			resp, err = http.Post(url, "application/json", buffer)
+			if err != nil {
+				return
+			}
+			defer resp.Body.Close()
+
+			accrual, err := client.SentOrder("123455")
+			if err != nil {
+				return
+			}
+			log.Println(accrual.Accrual)
+
+			assert.Equal(t, accrual.Status, tt.want.status)
+		})
+	}
+
 }
